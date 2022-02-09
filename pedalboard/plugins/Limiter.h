@@ -30,12 +30,12 @@ class Limiter : public JucePlugin<juce::dsp::Limiter<SampleType>> {
 };
 
 inline void init_limiter(py::module &m) {
-  py::class_<Limiter<float>, Plugin>(
+  py::class_<Limiter<float>, Plugin, std::shared_ptr<Limiter<float>>>(
       m, "Limiter",
       "A simple limiter with standard threshold and release time controls, "
       "featuring two compressors and a hard clipper at 0 dB.")
       .def(py::init([](float thresholdDb, float releaseMs) {
-             auto plugin = new Limiter<float>();
+             auto plugin = std::make_unique<Limiter<float>>();
              plugin->setThreshold(thresholdDb);
              plugin->setRelease(releaseMs);
              return plugin;

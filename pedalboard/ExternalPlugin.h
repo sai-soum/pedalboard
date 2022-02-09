@@ -193,6 +193,19 @@ public:
           pathToSharedObjectFile.getFullPathName().toStdString() + "\"` to " +
           "see which dependencies might be missing.).");
 #else
+
+// On certain Macs, plugins will only load if installed in the appropriate path.
+#if JUCE_MAC
+      bool pluginIsInstalled =
+          pluginFileStripped.contains("/Library/Audio/Plug-Ins/Components/");
+      if (!pluginIsInstalled) {
+        throw pybind11::import_error(
+            "Unable to load plugin " + pathToPluginFile.toStdString() +
+            ": unsupported plugin format or load failure. Plugin file may need "
+            "to be moved to /Library/Audio/Plug-Ins/Components/ or "
+            "~/Library/Audio/Plug-Ins/Components/.");
+      }
+#endif
       throw pybind11::import_error(
           "Unable to load plugin " + pathToPluginFile.toStdString() +
           ": unsupported plugin format or load failure.");
@@ -211,6 +224,35 @@ public:
         juce::MessageManager::deleteInstance();
       }
     }
+  }
+
+  struct PresetVisitor : public juce::ExtensionsVisitor {
+    const std::string presetFilePath;
+
+    PresetVisitor(const std::string presetFilePath)
+        : presetFilePath(presetFilePath) {}
+
+    void visitVST3Client(
+        const juce::ExtensionsVisitor::VST3Client &client) override {
+      juce::File presetFile(presetFilePath);
+      juce::MemoryBlock presetData;
+
+      if (!presetFile.loadFileAsData(presetData)) {
+        throw std::runtime_error("Failed to read preset file: " +
+                                 presetFilePath);
+      }
+
+      if (!client.setPreset(presetData)) {
+        throw std::runtime_error(
+            "Plugin returned an error when loading data from preset file: " +
+            presetFilePath);
+      }
+    }
+  };
+
+  void loadPresetData(std::string presetFilePath) {
+    PresetVisitor visitor{presetFilePath};
+    pluginInstance->getExtensions(visitor);
   }
 
   void reinstantiatePlugin() {
@@ -501,6 +543,7 @@ public:
 
       // Force prepare() to be called again later by invalidating lastSpec:
       lastSpec.maximumBlockSize = 0;
+      samplesProvided = 0;
     }
   }
 
@@ -530,8 +573,8 @@ public:
     }
   }
 
-  void
-  process(const juce::dsp::ProcessContextReplacing<float> &context) override {
+  int process(
+      const juce::dsp::ProcessContextReplacing<float> &context) override {
 
     if (pluginInstance) {
       juce::MidiBuffer emptyMidiBuffer;
@@ -601,7 +644,17 @@ public:
                                            pluginBufferChannelCount,
                                            outputBlock.getNumSamples());
       pluginInstance->processBlock(audioBuffer, emptyMidiBuffer);
+      samplesProvided += outputBlock.getNumSamples();
+
+      // To compensate for any latency added by the plugin,
+      // only tell Pedalboard to use the last _n_ samples.
+      long usableSamplesProduced =
+          std::max(0L, samplesProvided - pluginInstance->getLatencySamples());
+      return static_cast<int>(
+          std::min(usableSamplesProduced, (long)outputBlock.getNumSamples()));
     }
+
+    return 0;
   }
 
   std::vector<juce::AudioProcessorParameter *> getParameters() const {
@@ -621,6 +674,12 @@ public:
     return nullptr;
   }
 
+  virtual int getLatencyHint() override {
+    if (!pluginInstance)
+      return 0;
+    return pluginInstance->getLatencySamples();
+  }
+
 private:
   constexpr static int ExternalLoadSampleRate = 44100,
                        ExternalLoadMaximumBlockSize = 8192;
@@ -628,6 +687,8 @@ private:
   juce::PluginDescription foundPluginDescription;
   juce::AudioPluginFormatManager pluginFormatManager;
   std::unique_ptr<juce::AudioPluginInstance> pluginInstance;
+
+  long samplesProvided = 0;
 
   ExternalPluginReloadType reloadType = ExternalPluginReloadType::Unknown;
 };
@@ -740,7 +801,8 @@ inline void init_external_plugins(py::module &m) {
           "Returns the current value of the parameter as a string.");
 
 #if JUCE_PLUGINHOST_VST3 && (JUCE_MAC || JUCE_WINDOWS || JUCE_LINUX)
-  py::class_<ExternalPlugin<juce::VST3PluginFormat>, Plugin>(
+  py::class_<ExternalPlugin<juce::VST3PluginFormat>, Plugin,
+             std::shared_ptr<ExternalPlugin<juce::VST3PluginFormat>>>(
       m, "_VST3Plugin",
       "A wrapper around any Steinberg® VST3 audio effect plugin. Note that "
       "plugins must already support the operating system currently in use "
@@ -761,6 +823,10 @@ inline void init_external_plugins(py::module &m) {
              ss << ">";
              return ss.str();
            })
+      .def("load_preset",
+           &ExternalPlugin<juce::VST3PluginFormat>::loadPresetData,
+           "Load a VST3 preset file in .vstpreset format.",
+           py::arg("preset_file_path"))
       .def_property_readonly_static(
           "installed_plugins",
           [](py::object /* cls */) { return findInstalledVSTPluginPaths(); },
@@ -777,7 +843,8 @@ inline void init_external_plugins(py::module &m) {
 #endif
 
 #if JUCE_PLUGINHOST_AU && JUCE_MAC
-  py::class_<ExternalPlugin<juce::AudioUnitPluginFormat>, Plugin>(
+  py::class_<ExternalPlugin<juce::AudioUnitPluginFormat>, Plugin,
+             std::shared_ptr<ExternalPlugin<juce::AudioUnitPluginFormat>>>(
       m, "_AudioUnitPlugin",
       "A wrapper around any Apple Audio Unit audio effect plugin. Only "
       "available on macOS.",

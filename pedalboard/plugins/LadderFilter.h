@@ -58,10 +58,10 @@ class LadderFilter : public JucePlugin<juce::dsp::LadderFilter<SampleType>> {
 };
 
 inline void init_ladderfilter(py::module &m) {
-  py::class_<LadderFilter<float>, Plugin> ladderFilter(
-      m, "LadderFilter",
-      "Multi-mode audio filter based on the classic Moog synthesizer ladder "
-      "filter.");
+  py::class_<LadderFilter<float>, Plugin, std::shared_ptr<LadderFilter<float>>>
+      ladderFilter(m, "LadderFilter",
+                   "Multi-mode audio filter based on the classic Moog "
+                   "synthesizer ladder filter.");
 
   py::enum_<juce::dsp::LadderFilterMode>(ladderFilter, "Mode")
       .value("LPF12", juce::dsp::LadderFilterMode::LPF12,
@@ -81,7 +81,7 @@ inline void init_ladderfilter(py::module &m) {
   ladderFilter
       .def(py::init([](juce::dsp::LadderFilterMode mode, float cutoffHz,
                        float resonance, float drive) {
-             auto plugin = new LadderFilter<float>();
+             auto plugin = std::make_unique<LadderFilter<float>>();
              plugin->setMode(mode);
              plugin->setCutoffFrequencyHz(cutoffHz);
              plugin->setResonance(resonance);

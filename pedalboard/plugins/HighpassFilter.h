@@ -41,13 +41,14 @@ private:
 };
 
 inline void init_highpass(py::module &m) {
-  py::class_<HighpassFilter<float>, Plugin>(
+  py::class_<HighpassFilter<float>, Plugin,
+             std::shared_ptr<HighpassFilter<float>>>(
       m, "HighpassFilter",
       "Apply a first-order high-pass filter with a roll-off of 6dB/octave. "
       "The cutoff frequency will be attenuated by -3dB (i.e.: 0.707x as "
       "loud).")
       .def(py::init([](float cutoff_frequency_hz) {
-             auto plugin = new HighpassFilter<float>();
+             auto plugin = std::make_unique<HighpassFilter<float>>();
              plugin->setCutoffFrequencyHz(cutoff_frequency_hz);
              return plugin;
            }),

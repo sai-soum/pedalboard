@@ -41,13 +41,14 @@ private:
 };
 
 inline void init_lowpass(py::module &m) {
-  py::class_<LowpassFilter<float>, Plugin>(
+  py::class_<LowpassFilter<float>, Plugin,
+             std::shared_ptr<LowpassFilter<float>>>(
       m, "LowpassFilter",
       "Apply a first-order low-pass filter with a roll-off of 6dB/octave. "
       "The cutoff frequency will be attenuated by -3dB (i.e.: 0.707x as "
       "loud).")
       .def(py::init([](float cutoff_frequency_hz) {
-             auto plugin = new LowpassFilter<float>();
+             auto plugin = std::make_unique<LowpassFilter<float>>();
              plugin->setCutoffFrequencyHz(cutoff_frequency_hz);
              return plugin;
            }),

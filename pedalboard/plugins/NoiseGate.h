@@ -33,13 +33,13 @@ class NoiseGate : public JucePlugin<juce::dsp::NoiseGate<SampleType>> {
 
 inline void init_noisegate(py::module &m) {
 
-  py::class_<NoiseGate<float>, Plugin>(
+  py::class_<NoiseGate<float>, Plugin, std::shared_ptr<NoiseGate<float>>>(
       m, "NoiseGate",
       "A simple noise gate with standard threshold, ratio, attack time and "
       "release time controls. Can be used as an expander if the ratio is low.")
       .def(py::init([](float thresholddB, float ratio, float attackMs,
                        float releaseMs) {
-             auto plugin = new NoiseGate<float>();
+             auto plugin = std::make_unique<NoiseGate<float>>();
              plugin->getDSP().setThreshold(thresholddB);
              plugin->getDSP().setRatio(ratio);
              plugin->getDSP().setAttack(attackMs);

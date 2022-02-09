@@ -1,3 +1,12 @@
 [submodule "JUCE"]
 	path = JUCE
-	url = git@github.com:juce-framework/JUCE.git
+	url = https://github.com/juce-framework/JUCE.git
+[submodule "vendors/rubberband"]
+	path = vendors/rubberband
+	url = https://github.com/BreakfastQuay/Rubberband.git
+[submodule "vendors/lame"]
+	path = vendors/lame
+	url = https://github.com/lameproject/lame.git
+[submodule "vendors/libgsm"]
+	path = vendors/libgsm
+	url = git@github.com:timothytylee/libgsm.git

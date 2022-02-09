@@ -37,7 +37,7 @@ class Chorus : public JucePlugin<juce::dsp::Chorus<SampleType>> {
 };
 
 inline void init_chorus(py::module &m) {
-  py::class_<Chorus<float>, Plugin>(
+  py::class_<Chorus<float>, Plugin, std::shared_ptr<Chorus<float>>>(
       m, "Chorus",
       "A basic chorus effect. This audio effect can be controlled via the "
       "speed and depth of the LFO controlling the frequency response, a mix "
@@ -49,7 +49,7 @@ inline void init_chorus(py::module &m) {
       "lot of feedback, and as a vibrato effect if the mix value is 1.")
       .def(py::init([](float rateHz, float depth, float centreDelayMs,
                        float feedback, float mix) {
-             auto plugin = new Chorus<float>();
+             auto plugin = std::make_unique<Chorus<float>>();
              plugin->setRate(rateHz);
              plugin->setDepth(depth);
              plugin->setCentreDelay(centreDelayMs);

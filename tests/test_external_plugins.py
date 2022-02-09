@@ -16,18 +16,28 @@
 
 
 import os
+import time
 import math
+import atexit
 import random
+import shutil
 import platform
 from glob import glob
+from pathlib import Path
 
-from pedalboard.pedalboard import WrappedBool, strip_common_float_suffixes
+from pedalboard.pedalboard import (
+    WrappedBool,
+    strip_common_float_suffixes,
+    normalize_python_parameter_name,
+)
 import pytest
 import pedalboard
 import numpy as np
+from typing import Optional
 
 
 TEST_PLUGIN_BASE_PATH = os.path.join(os.path.abspath(os.path.dirname(__file__)), "plugins")
+TEST_PRESET_BASE_PATH = os.path.join(os.path.abspath(os.path.dirname(__file__)), "presets")
 
 AVAILABLE_PLUGINS_IN_TEST_ENVIRONMENT = [
     os.path.basename(filename)
@@ -43,14 +53,18 @@ if os.getenv("CIBW_TEST_REQUIRES") or os.getenv("CI"):
 
 
 def get_parameters(plugin_filename: str):
-    try:
-        return load_test_plugin(plugin_filename).parameters
-    except ImportError:
-        return {}
+    return load_test_plugin(plugin_filename).parameters
 
 
 TEST_PLUGIN_CACHE = {}
 TEST_PLUGIN_ORIGINAL_PARAMETER_CACHE = {}
+
+# If true, copy all test Audio Units into the appropriate install path
+# before running tests. On some versions of macOS, this is necessary or
+# else Audio Units won't load.
+TEMPORARILY_INSTALL_AUDIO_UNITS = True
+PLUGIN_FILES_TO_DELETE = set()
+MACOS_PLUGIN_INSTALL_PATH = Path.home() / "Library" / "Audio" / "Plug-Ins" / "Components"
 
 
 def load_test_plugin(plugin_filename: str, disable_caching: bool = False, *args, **kwargs):
@@ -64,9 +78,35 @@ def load_test_plugin(plugin_filename: str, disable_caching: bool = False, *args,
 
     key = repr((plugin_filename, args, tuple(kwargs.items())))
     if key not in TEST_PLUGIN_CACHE or disable_caching:
-        plugin = pedalboard.load_plugin(
-            os.path.join(TEST_PLUGIN_BASE_PATH, platform.system(), plugin_filename), *args, **kwargs
-        )
+        plugin_path = os.path.join(TEST_PLUGIN_BASE_PATH, platform.system(), plugin_filename)
+
+        if (
+            platform.system() == "Darwin"
+            and plugin_filename.endswith(".component")
+            and TEMPORARILY_INSTALL_AUDIO_UNITS
+        ):
+            # On certain macOS machines, it seems AudioUnit components must be
+            # installed in ~/Library/Audio/Plug-Ins/Components in order to be loaded.
+            installed_plugin_path = os.path.join(MACOS_PLUGIN_INSTALL_PATH, plugin_filename)
+            plugin_already_installed = os.path.exists(installed_plugin_path)
+            if not plugin_already_installed:
+                shutil.copytree(plugin_path, installed_plugin_path)
+                PLUGIN_FILES_TO_DELETE.add(installed_plugin_path)
+            plugin_path = installed_plugin_path
+
+        # Try to load a given plugin multiple times if necessary.
+        # Unsure why this is necessary, but it seems this only happens in test.
+        exception = None
+        for attempt in range(5):
+            try:
+                plugin = pedalboard.load_plugin(plugin_path, *args, **kwargs)
+                break
+            except ImportError as e:
+                exception = e
+                time.sleep(attempt)
+        else:
+            raise exception
+
         if disable_caching:
             return plugin
         TEST_PLUGIN_CACHE[key] = plugin
@@ -87,6 +127,14 @@ def load_test_plugin(plugin_filename: str, disable_caching: bool = False, *args,
     return plugin
 
 
+def delete_installed_plugins():
+    for plugin_file in PLUGIN_FILES_TO_DELETE:
+        shutil.rmtree(plugin_file)
+
+
+atexit.register(delete_installed_plugins)
+
+
 # Allow testing with all of the plugins on the local machine:
 if os.environ.get("ENABLE_TESTING_WITH_LOCAL_PLUGINS", False):
     for plugin_class in pedalboard.AVAILABLE_PLUGIN_CLASSES:
@@ -96,6 +144,16 @@ if os.environ.get("ENABLE_TESTING_WITH_LOCAL_PLUGINS", False):
                 AVAILABLE_PLUGINS_IN_TEST_ENVIRONMENT.append(plugin_path)
             except Exception:
                 pass
+
+
+def plugin_named(*substrings: str) -> Optional[str]:
+    """
+    Return the first plugin filename that contains all of the
+    provided substrings from the list of available test plugins.
+    """
+    for plugin_filename in AVAILABLE_PLUGINS_IN_TEST_ENVIRONMENT:
+        if all([s in plugin_filename for s in substrings]):
+            return plugin_filename
 
 
 def max_volume_of(x: np.ndarray) -> float:
@@ -130,6 +188,32 @@ def test_at_least_one_parameter(plugin_filename: str):
     """
 
     assert get_parameters(plugin_filename)
+
+
+@pytest.mark.parametrize(
+    "plugin_filename,plugin_preset",
+    [
+        (plugin, os.path.join(TEST_PRESET_BASE_PATH, plugin + ".vstpreset"))
+        for plugin in AVAILABLE_PLUGINS_IN_TEST_ENVIRONMENT
+        if os.path.isfile(os.path.join(TEST_PRESET_BASE_PATH, plugin + ".vstpreset"))
+    ],
+)
+def test_preset_parameters(plugin_filename: str, plugin_preset: str):
+    # plugin with default params.
+    plugin = load_test_plugin(plugin_filename)
+
+    default_params = {k: v.raw_value for k, v in plugin.parameters.items() if v.type == float}
+
+    # load preset file
+    plugin.load_preset(plugin_preset)
+
+    for name, default in default_params.items():
+        actual = getattr(plugin, name)
+        if math.isnan(actual):
+            continue
+        assert (
+            actual != default
+        ), f"Expected attribute {name} to be different from default ({default}), but was {actual}"
 
 
 @pytest.mark.parametrize("plugin_filename", AVAILABLE_PLUGINS_IN_TEST_ENVIRONMENT)
@@ -502,17 +586,17 @@ def test_explicit_reset(plugin_filename: str):
 @pytest.mark.parametrize("plugin_filename", AVAILABLE_PLUGINS_IN_TEST_ENVIRONMENT)
 def test_explicit_reset_in_pedalboard(plugin_filename: str):
     sr = 44100
-    board = pedalboard.Pedalboard([load_test_plugin(plugin_filename, disable_caching=True)], sr)
+    board = pedalboard.Pedalboard([load_test_plugin(plugin_filename, disable_caching=True)])
     noise = np.random.rand(sr, 2)
 
     assert max_volume_of(noise) > 0.95
     silence = np.zeros_like(noise)
     assert max_volume_of(silence) == 0.0
 
-    assert max_volume_of(board(silence, reset=False)) < 0.00001
-    assert max_volume_of(board(noise, reset=False)) > 0.00001
+    assert max_volume_of(board(silence, reset=False, sample_rate=sr)) < 0.00001
+    assert max_volume_of(board(noise, reset=False, sample_rate=sr)) > 0.00001
     board.reset()
-    assert max_volume_of(board(silence, reset=False)) < 0.00001
+    assert max_volume_of(board(silence, reset=False, sample_rate=sr)) < 0.00001
 
 
 @pytest.mark.parametrize("value", (True, False))
@@ -530,3 +614,37 @@ def test_wrapped_bool(value: bool):
 def test_wrapped_bool_requires_bool():
     with pytest.raises(TypeError):
         assert WrappedBool(None)
+
+
+@pytest.mark.parametrize(
+    "_input,expected",
+    [
+        ("C#", "c_sharp"),
+        ("B♭", "b_flat"),
+        ("Azimuth (º)", "azimuth"),
+        ("Normal String", "normal_string"),
+    ],
+)
+def test_parameter_name_normalization(_input: str, expected: str):
+    assert normalize_python_parameter_name(_input) == expected
+
+
+@pytest.mark.skipif(not plugin_named("CHOWTapeModel"), reason="Missing CHOWTapeModel plugin.")
+@pytest.mark.parametrize("buffer_size", [16, 128, 8192, 65536])
+@pytest.mark.parametrize("oversampling", [1, 2, 4, 8, 16])
+def test_external_plugin_latency_compensation(buffer_size: int, oversampling: int):
+    """
+    This test loads CHOWTapeModel (which has non-zero latency due
+    to an internal oversampler), puts it into Bypass mode, then
+    ensures that the input matches the output exactly.
+    """
+    num_seconds = 10.0
+    sample_rate = 48000
+    noise = np.random.rand(int(num_seconds * sample_rate))
+
+    plugin = load_test_plugin(plugin_named("CHOWTapeModel"), disable_caching=True)
+    plugin.bypass = True
+    plugin.oversampling = oversampling
+
+    output = plugin.process(noise, sample_rate, buffer_size=buffer_size)
+    np.testing.assert_allclose(output, noise, atol=0.05)
